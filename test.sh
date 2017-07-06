@@ -38,8 +38,13 @@ if [ $? -ne 0 ]; then
 fi
 test 0 0
 test abc '"abc"'
-testfail '"abc'
-testfail '0abc'
 
-rm -f tmp.out tmp.s
+test 3 '1+2'
+test 3 '1 + 2'
+test 10 '1+2+3+4'
+
+testfail '0abc'
+testfail '"abc'
+testfail '1+'
+
 echo "All test passed"

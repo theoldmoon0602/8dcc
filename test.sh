@@ -1,24 +1,45 @@
 #!/bin/bash
 
+function compile {
+	echo "$1" | ./8dcc > tmp.s
+	if [ $? -ne 0 ]; then
+		echo "Failed to compile $1"
+		exit
+	fi
+	gcc -o tmp.out driver.c tmp.s || exit
+	if [ $? -ne 0 ]; then
+		echo "GCC failed"
+		exit
+	fi
+}
 function test {
 	expected="$1"
 	expr="$2"
 
-	echo "$expr" | ./8dcc > tmp.s
-	if [ ! $? ]; then 
-		echo "Failed to comiple $expr"
-		exit
-	fi
-	gcc -o tmp.out driver.c tmp.s || exit
+	compile "$expr"
 	result="`./tmp.out`"
 	if [ "$result" != "$expected" ]; then
 		echo "Test failed: $expected expected but got $result"
 		exit
 	fi
 }
+function testfail {
+	expr="$1"
+	echo "$expr" | ./8dcc > /dev/null 2>&1
+	if [ $? -eq 0 ]; then
+		echo "Should fail to compile, but succeeded: $expr"
+		exit
+	fi
+}
 dub build
+if [ $? -ne 0 ]; then
+	echo "dub build failed"
+	exit
+fi
 test 0 0
-test 42 42
+test abc '"abc"'
+testfail '"abc'
+testfail '0abc'
 
 rm -f tmp.out tmp.s
 echo "All test passed"

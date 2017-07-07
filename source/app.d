@@ -7,15 +7,13 @@ import core.stdc.stdlib;
 import core.stdc.stdio : ungetc;
 
 
-enum AST_TYPE {
-	OP_PLUS,
-	OP_MINUS,
-	INT,
+enum AST_TYPE : char{
+	INT = 254,
 	STR
 }
 
 class Ast {
-	AST_TYPE type;
+	char type;
 	union {
 		int ival;
 		string sval;
@@ -24,7 +22,7 @@ class Ast {
 			Ast right;
 		}
 	}
-	this(AST_TYPE type, Ast left, Ast right) {
+	this(char type, Ast left, Ast right) {
 		this.type = type;
 		this.left = left;
 		this.right = right;
@@ -39,6 +37,22 @@ class Ast {
 		this.sval = str;
 	}
 }
+int priority(char op) {
+	switch(op) {
+		case '+':
+		case '-':
+			return 1;
+		case '*':
+		case '/':
+			return 2;
+		default:
+			break;
+	}
+	stderr.writefln("Unknown binary operator :%c", op);
+	exit(1);
+	return 0;
+}
+
 void skip_space() {
 	dchar c;
 	while (readf("%c", c)) {
@@ -81,26 +95,22 @@ Ast read_prim() {
 	return null;
 }
 
-Ast read_expr2(Ast left) {
-	skip_space();
-	dchar c;
-	if (!readf("%c", c)) {
-		return left;
+Ast read_expr2(int prec) {
+	Ast ast = read_prim();
+	while (true) {
+		skip_space();
+		dchar c;
+		if (!readf("%c", c)) {
+			return ast;
+		}
+		int prec2 = priority(cast(char)c);
+		if (prec2 < prec) {
+			ungetc(cast(char)c, stdin.getFP);
+			return ast;
+		}
+		skip_space();
+		ast = new Ast(cast(char)c, ast, read_expr2(prec2+1));
 	}
-	AST_TYPE op;
-	if (c == '+') {
-		op = AST_TYPE.OP_PLUS;
-	}
-	else if (c == '-') {
-		op = AST_TYPE.OP_MINUS;
-	}
-	else {
-		stderr.writefln("Operator expected, but got '%c'", c);
-		exit(1);
-	}
-	skip_space();
-	Ast right = read_prim();
-	return read_expr2(new Ast(op, left, right));
 }
 
 Ast read_string() {
@@ -127,8 +137,7 @@ Ast read_string() {
 }
 
 Ast read_expr() {
-	Ast left = read_prim();
-	return read_expr2(left);
+	return read_expr2(0);
 }
 
 void print_quote(string s) {
@@ -153,27 +162,50 @@ void emit_string(Ast ast) {
 }
 void emit_binop(Ast ast) {
 	string op;
-	if (ast.type == AST_TYPE.OP_PLUS) {
-		op = "add";
+	switch (ast.type) {
+		case '+':
+			op = "add";
+			break;
+		case '-':
+			op = "sub";
+			break;
+		case '*':
+			op = "imul";
+			break;
+		case '/':
+			break;
+		default:
+			stderr.writefln("invalid operator '%c'", ast.type);
+			exit(1);
+			break;
 	}
-	else if (ast.type == AST_TYPE.OP_MINUS) {
-		op = "sub";
+
+	emit_intexpr(ast.left);
+	write("push %rax\n\t");
+	emit_intexpr(ast.right);
+	if (ast.type == '/') {
+		write("mov %eax, %ebx\n\t");
+		write("pop %rax\n\t");
+		write("mov $0, %edx\n\t");
+		write("idiv %ebx\n\t");
 	}
 	else {
-		stderr.writeln("invalid operand");
-		exit(1);
+		write("pop %rbx\n\t");
+		writef("%s %%ebx, %%eax\n\t", op);
 	}
-	emit_intexpr(ast.left);
-	write("mov %eax, %ebx\n\t");
-	emit_intexpr(ast.right);
-	writef("%s %%ebx, %%eax\n\t", op);
 }
 void ensure_intexpr(Ast ast) {
-	if (ast.type != AST_TYPE.OP_PLUS &&
-		ast.type != AST_TYPE.OP_MINUS &&
-		ast.type != AST_TYPE.INT) {
+	switch (ast.type) {
+		case '+':
+		case '-':
+		case '*':
+		case '/':
+		case AST_TYPE.INT:
+			return;
+		default:
 		stderr.writeln("integer or binary operator expected");
 		exit(1);
+		break;
 	}
 }
 void emit_intexpr(Ast ast) {
@@ -186,23 +218,19 @@ void emit_intexpr(Ast ast) {
 	}
 }
 void print_ast(Ast ast) {
-	final switch(ast.type) {
-		case AST_TYPE.OP_PLUS:
-			write("(+ ");
-			goto print_op;
-		case AST_TYPE.OP_MINUS:
-			write("(- ");
-print_op:
-			print_ast(ast.left);
-			write(" ");
-			print_ast(ast.right);
-			write(")");
-			break;
+	switch(ast.type) {
 		case AST_TYPE.INT:
 			writef("%d", ast.ival);
 			break;
 		case AST_TYPE.STR:
 			print_quote(ast.sval);
+			break;
+		default:
+			writef("(%c ", ast.type);
+			print_ast(ast.left);
+			write(" ");
+			print_ast(ast.right);
+			write(")");
 			break;
 	}
 }

@@ -8,8 +8,9 @@ import core.stdc.stdio : ungetc;
 
 
 enum AST_TYPE : char{
-	INT = 254,
-	SYM
+	INT = 253,
+	SYM,
+	FUNCALL,
 }
 
 class Var {
@@ -33,6 +34,10 @@ class Ast {
 			Ast left;
 			Ast right;
 		}
+		struct {
+			string fname;
+			Ast[] args;
+		}
 	}
 	this(char type, Ast left, Ast right) {
 		this.type = type;
@@ -48,12 +53,18 @@ class Ast {
 		this.type = AST_TYPE.SYM;
 		this.var = var;
 	}
+	this(string fname, Ast[] args) {
+		this.type = AST_TYPE.FUNCALL;
+		this.fname = fname;
+		this.args = args;
+	}
 }
 Var vars = null;
+string[] REGS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+
 
 Var find_var(string name) {
-	Var v = vars;
-	for (; v; v = v.next) {
+	for (Var v = vars; v; v = v.next) {
 		if (name == v.name) {
 			return v;
 		}
@@ -110,7 +121,7 @@ Ast read_prim() {
 		return read_number(cast(int)(c - '0'));
 	}
 	else if (c.isAlpha) {
-		return read_symbol(c);
+		return read_ident_or_func(c);
 	}
 	stderr.writefln("Don't know how to handle '%c'", c);
 	exit(1);
@@ -120,7 +131,7 @@ Ast read_prim() {
 Ast read_expr2(int prec) {
 	skip_space();
 	Ast ast = read_prim();
-	if (!ast) {
+	if (ast is null) {
 		return null;
 	}
 	while (true) {
@@ -139,7 +150,7 @@ Ast read_expr2(int prec) {
 	}
 }
 
-Ast read_symbol(dchar c) {
+string read_ident(dchar c) {
 	dchar[] buf;
 	buf ~= c;
 	while (true) {
@@ -147,30 +158,71 @@ Ast read_symbol(dchar c) {
 			stderr.writeln("Unterminated string");
 			exit(1);
 		}
-		if (! c.isAlpha) {
+		if (! c.isAlphaNum) {
 			ungetc(cast(char)c, stdin.getFP);
 			break;
 		}
 		buf ~= c;
 	}
 	buf ~= '\0';
-	Var v = find_var(buf.to!string);
-	if (!v) {
-		v = new Var(buf.to!string, vars);
+	return buf.to!string;
+}
+Ast read_func_args(string fname) {
+	Ast[] args;
+	while (true) {
+		skip_space();
+		dchar c;
+		readf("%c", c);
+		if (c == ')') {
+			break;
+		}
+		ungetc(cast(char)c, stdin.getFP);
+		args ~= read_expr2(0);
+		readf("%c", c);
+		if (c == ')') {
+			break;
+		}
+		if (c == ',') {
+			skip_space();
+		}
+		else {
+			stderr.writefln("Unexpected character : '%c'", c);
+			exit(1);
+		}
+	}
+	if (args.length > REGS.length) {
+		stderr.writefln("Too many arguments: %s", fname);
+		exit(1);
+	}
+
+	return new Ast(fname, args);
+}
+Ast read_ident_or_func(dchar c) {
+	string name = read_ident(c);
+	skip_space();
+	dchar c2;
+	readf("%c", c2);
+	if (c2 == '(') {
+		return read_func_args(name);
+	}
+	ungetc(cast(char)c2, stdin.getFP);
+	Var v = find_var(name);
+	if (v is null) {
+		v = new Var(name, vars);
 	}
 	return new Ast(v);
 }
 
 Ast read_expr() {
 	Ast r = read_expr2(0);
-	if (!r) {
+	if (r is null) {
 		return null;
 	}
 	skip_space();
 	dchar c;
 	readf("%c", c);
 	if (c != ';') {
-		stderr.writeln("Unterminated expression");
+		stderr.writefln("Unterminated expression. Expected ; but '%c' got", c);
 		exit(1);
 	}
 	return r;
@@ -235,6 +287,27 @@ void emit_expr(Ast ast) {
 		case AST_TYPE.SYM:
 			writef("mov -%d(%%rbp), %%eax\n\t", ast.var.pos*4);
 			break;
+		case AST_TYPE.FUNCALL:
+			// レジスタの値を退避
+			for (int i = 1; i < ast.args.length; i++) {
+				writef("push %%%s\n\t", REGS[i]);
+			}
+			// 引数をpush
+			foreach(arg; ast.args) {
+				emit_expr(arg);
+				write("push %rax\n\t");
+			}
+			// レジスタにpop
+			for (int i = cast(int)ast.args.length-1; i >= 0; i--) {
+				writef("pop %%%s\n\t", REGS[i]);
+			}
+			write("mov $0, %eax\n\t");
+			writef("call %s\n\t", ast.fname);
+			// 退避した値を戻す
+			for (int i = cast(int)ast.args.length-1; i > 0; i--) {
+				writef("pop %%%s\n\t", REGS[i]);
+			}
+			break;
 		default:
 			emit_binop(ast);
 			break;
@@ -247,6 +320,16 @@ void print_ast(Ast ast) {
 			break;
 		case AST_TYPE.SYM:
 			writef("%s", ast.var.name);
+			break;
+		case AST_TYPE.FUNCALL:
+			writef("%s(", ast.fname);
+			for (int i = 0; i < ast.args.length; i++) {
+				print_ast(ast.args[i]);
+				if (i+1 < ast.args.length) {
+					write(",");
+				}
+			}
+			write(")");
 			break;
 		default:
 			writef("(%c ", ast.type);

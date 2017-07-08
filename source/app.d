@@ -13,11 +13,20 @@ enum AST_TYPE : int {
 	STR = -3,
 	FUNCALL = -4,
 	CHAR = -5,
+	DECL = -6,
+}
+
+enum CTYPE: int {
+	VOID,
+	INT,
+	CHAR,
+	STR
 }
 
 
 class Ast {
 	int type;
+	int ctype;
 	union {
 		// INT
 		int ival;
@@ -46,12 +55,17 @@ class Ast {
 			Ast[] args;
 		}
 	}
+	// Declaration
+	struct {
+		Ast decl_var;
+		Ast decl_init;
+	}
+	this() {}
 	this(char type, Ast left, Ast right) {
 		this.type = type;
 		this.left = left;
 		this.right = right;
 	}
-
 	this(int val) {
 		this.type = AST_TYPE.INT;
 		this.ival = val;
@@ -65,36 +79,35 @@ class Ast {
 		this.type = AST_TYPE.CHAR;
 		this.c = c;
 	}
-	this(int type, string str, ref Ast strings) {
-		if (type == AST_TYPE.STR) {
-			init_string(str, strings);
-		}
-		else if (type == AST_TYPE.VAR) {
-			init_var(str, strings);
-		}
-		else {
-			error("Unexpected type");
-		}
+	this(Ast var, Ast init) {
+		this.type = AST_TYPE.DECL;
+		this.decl_var = var;
+		this.decl_init = init;
 	}
-	void init_string(string str, ref Ast strings) {
-		this.type = AST_TYPE.STR;
-		this.sval = str;
+	static Ast newStr(string str, ref Ast strings) {
+		Ast ast = new Ast();
+		ast.type = AST_TYPE.STR;
+		ast.sval = str;
 		if (strings is null) {
-			this.sid = 0;
-			this.snext = null;
+			ast.sid = 0;
+			ast.snext = null;
 		}
 		else {
-			this.sid = strings.sid+1;
-			this.snext = strings;
+			ast.sid = strings.sid+1;
+			ast.snext = strings;
 		}
-		strings = this;
+		strings = ast;
+		return ast;
 	}
-	void init_var(string vname, ref Ast vars) {
-		this.type =AST_TYPE.VAR;
-		this.vname = vname;
-		this.vpos = vars ? vars.vpos + 1 : 0;
-		this.vnext = vars;
-		vars = this;
+	static Ast newVar(int ctype, string vname, ref Ast vars) {
+		Ast ast = new Ast();
+		ast.type = AST_TYPE.VAR;
+		ast.ctype = ctype;
+		ast.vname = vname;
+		ast.vpos = vars ? vars.vpos + 1 : 1;
+		ast.vnext = vars;
+		vars = ast;
+		return ast;
 	}
 }
 Ast vars = null;
@@ -140,14 +153,14 @@ Ast read_prim() {
 		case TOKEN_TYPE.CHAR:
 			return new Ast(tok.c);
 		case TOKEN_TYPE.STRING:
-			return new Ast(AST_TYPE.STR, tok.sval, strings);
+			return Ast.newStr(tok.sval, strings);
 		case TOKEN_TYPE.PUNCT:
 			error("unexpected character: '%c'", tok.punct);
 	}
 	return null;
 }
 
-Ast read_expr2(int prec) {
+Ast read_expr(int prec) {
 	Ast ast = read_prim();
 	if (ast is null) {
 		return null;
@@ -163,7 +176,10 @@ Ast read_expr2(int prec) {
 			unget_token(tok);
 			return ast;
 		}
-		ast = new Ast(tok.punct, ast, read_expr2(prec2+1));
+		if (is_punct(tok, '=')) {
+			ensure_lvalue(ast);
+		}
+		ast = new Ast(tok.punct, ast, read_expr(prec2+1));
 	}
 }
 
@@ -175,7 +191,7 @@ Ast read_func_args(string fname) {
 			break;
 		}
 		unget_token(tok);
-		args ~= read_expr2(0);
+		args ~= read_expr(0);
 		tok = read_token();
 		if (is_punct(tok, ')')) {
 			break;
@@ -197,17 +213,64 @@ Ast read_ident_or_func(string name) {
 	}
 	unget_token(tok);
 	Ast v = find_var(name);
-	return (v !is null) ?  v : new Ast(AST_TYPE.VAR, name, vars);
-
+	if (v is null) {
+		error("Undefined variable: %s", name);
+	}
+	return v;
 }
 
-Ast read_expr() {
-	Ast r = read_expr2(0);
-	if (r is null) {
+void ensure_lvalue(Ast ast) {
+	if (ast.type != AST_TYPE.VAR) {
+		error("variable expected");
+	}
+}
+
+int get_ctype(Token tok) {
+	if (tok.type != TOKEN_TYPE.IDENT) {
+		return -1;
+	}
+	if (tok.sval == "int") {
+		return CTYPE.INT;
+	}
+	if (tok.sval == "char") {
+		return CTYPE.CHAR;
+	}
+	if (tok.sval == "string") {
+		return CTYPE.STR;
+	}
+
+	return -1;
+}
+
+bool is_type_keyword(Token tok) {
+	return get_ctype(tok) != -1;
+}
+
+void expect(char punct) {
+	Token tok = read_token();
+	if (! is_punct(tok, punct)) {
+		error("'%c' expected, but got %s", punct, tok);
+	}
+}
+Ast read_decl() {
+	int ctype = get_ctype(read_token());
+	Token name = read_token();
+	if (name.type != TOKEN_TYPE.IDENT) {
+		error("Identifier expected, but got %s", name);
+	}
+	Ast var = Ast.newVar(ctype, name.sval, vars);
+	expect('=');
+	Ast init = read_expr(0);
+	return new Ast(var, init);
+}
+Ast read_decl_or_stmt() {
+	Token tok = peek_token();
+	if (tok is null) {
 		return null;
 	}
-	Token tok = read_token();
-	if (! is_punct(tok, ';')) {
+	Ast r = is_type_keyword(tok) ? read_decl() : read_expr(0);
+	tok = read_token();
+	if (!is_punct(tok, ';')) {
 		error("Unterminated expression: %s", tok);
 	}
 	return r;
@@ -221,13 +284,13 @@ void print_quote(string s) {
 		writef("%c", c);
 	}
 }
+void emit_assign(Ast var, Ast value) {
+	emit_expr(value);
+	writef("mov %%eax, -%d(%%rbp)\n\t", var.vpos * 4);
+}
 void emit_binop(Ast ast) {
 	if (ast.type == '=') {
-		emit_expr(ast.right);
-		if (ast.left.type != AST_TYPE.VAR) {
-			error("Symbol expected");
-		}
-		writefln("mov %%eax, -%d(%%rbp)\n\t", ast.left.vpos*4);
+		emit_assign(ast.left, ast.right);
 		return;
 	}
 	string op;
@@ -282,7 +345,7 @@ void emit_expr(Ast ast) {
 				writef("push %%%s\n\t", REGS[i]);
 			}
 			// 引数をpush
-			foreach(arg; ast.args) {
+			foreach(arg;ast.args) {
 				emit_expr(arg);
 				write("push %rax\n\t");
 			}
@@ -297,11 +360,15 @@ void emit_expr(Ast ast) {
 				writef("pop %%%s\n\t", REGS[i]);
 			}
 			break;
+		case AST_TYPE.DECL:
+			emit_assign(ast.decl_var, ast.decl_init);
+			break;
 		default:
 			emit_binop(ast);
 			break;
 	}
 }
+
 void print_ast(Ast ast) {
 	switch(ast.type) {
 		case AST_TYPE.INT:
@@ -326,6 +393,11 @@ void print_ast(Ast ast) {
 					write(",");
 				}
 			}
+			write(")");
+			break;
+		case AST_TYPE.DECL:
+			writef("(decl %s %s ", (cast(CTYPE)ast.decl_var.ctype).to!string.toLower, ast.decl_var.vname);
+			print_ast(ast.decl_init);
 			write(")");
 			break;
 		default:
@@ -354,7 +426,7 @@ int main(string[] args)
 	auto wantast = (args.length > 1 && args[1] == "-a");
 	Ast[] exprs;
 	while (true) {
-		Ast t = read_expr();
+		Ast t = read_decl_or_stmt();
 		if (t is null) {
 			break;
 		}

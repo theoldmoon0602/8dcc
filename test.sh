@@ -1,7 +1,7 @@
 #!/bin/bash
 
 function compile {
-	echo "$1" | ./8dcc > tmp.s
+	echo "$1" | ./d8cc > tmp.s
 	if [ $? -ne 0 ]; then
 		echo "Failed to compile $1"
 		exit
@@ -19,7 +19,7 @@ function assertequal {
 	fi
 }
 function testast {
-	result="$(echo "$2" | ./8dcc -a)"
+	result="$(echo "$2" | ./d8cc -a)"
 	if [ $? -ne 0 ]; then
 		echo "Failed to compile $2"
 		exit
@@ -32,7 +32,7 @@ function test {
 }
 function testfail {
 	expr="$1"
-	echo "$expr" | ./8dcc > /dev/null 2>&1
+	echo "$expr" | ./d8cc > /dev/null 2>&1
 	if [ $? -eq 0 ]; then
 		echo "Should fail to compile, but succeeded: $expr"
 		exit

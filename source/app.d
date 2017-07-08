@@ -1,10 +1,10 @@
 import std.stdio;
 import std.string;
 import std.conv;
-import std.conv;
 import std.uni;
-import core.stdc.stdlib;
-import core.stdc.stdio : ungetc;
+
+import d8cc;
+
 
 
 enum AST_TYPE : int {
@@ -73,8 +73,7 @@ class Ast {
 			init_var(str, strings);
 		}
 		else {
-			stderr.writeln("Unexpected type");
-			exit(1);
+			error("Unexpected type");
 		}
 	}
 	void init_string(string str, ref Ast strings) {
@@ -127,179 +126,79 @@ int priority(char op) {
 	return -1;
 }
 
-void skip_space() {
-	dchar c;
-	while (readf("%c", c)) {
-		if (c.isWhite) {
-			continue;
-		}
-		ungetc(c.to!char, stdin.getFP);
-		break;
-	}
-	return;
-}
-
-Ast read_number(int n) {
-	while (true) {
-		dchar c;
-		readf("%c", c);
-		if (!c.isNumber) {
-			ungetc(c.to!char, stdin.getFP);
-			break;
-		}
-		n = n * 10 + cast(int)(c-'0');
-	}
-	return new Ast(n);
-}
 
 Ast read_prim() {
-	dchar c;
-	if (!readf("%c", c)) {
+	Token tok = read_token();
+	if (tok is null) {
 		return null;
 	}
-	else if (c.isNumber) {
-		return read_number(cast(int)(c - '0'));
+	final switch (tok.type) {
+		case TOKEN_TYPE.IDENT:
+			return read_ident_or_func(tok.sval);
+		case TOKEN_TYPE.INT:
+			return new Ast(tok.ival);
+		case TOKEN_TYPE.CHAR:
+			return new Ast(tok.c);
+		case TOKEN_TYPE.STRING:
+			return new Ast(AST_TYPE.STR, tok.sval, strings);
+		case TOKEN_TYPE.PUNCT:
+			error("unexpected character: '%c'", tok.punct);
 	}
-	else if (c == '"') {
-		return read_string();
-	}
-	else if (c == '\'') {
-		return read_char();
-	}
-	else if (c.isAlpha) {
-		return read_ident_or_func(c);
-	}
-	stderr.writefln("Don't know how to handle '%c'", c);
-	exit(1);
 	return null;
-}
-Ast read_char() {
-	dchar c;
-	dchar c2;
-	if (!readf("%c", c)) {
-		goto err;
-	}
-	if (c == '\\') {
-		if (!readf("%c", c)) {
-			goto err;
-		}
-	}
-	if (!readf("%c", c2)) {
-		goto err;
-	}
-	if (c2 != '\'') {
-		stderr.writefln("Malformed char constant");
-		exit(1);
-	}
-	return new Ast(cast(char)c);
-err:
-	stderr.writefln("Unterminated char");
-	exit(1);
-	return null;
-}
-Ast read_string() {
-	dchar[] buf;
-	while (true) {
-		dchar c;
-		if (! readf("%c", c)) {
-			stderr.writeln("Unterminated string");
-			exit(1);
-		}
-		if (c == '"') {
-			break;
-		}
-		if (c == '\\') {
-			if (! readf("%c", c)) {
-				stderr.writeln("Unterminated string");
-				exit(1);
-			}
-		}
-		buf ~= c;
-	}
-	buf ~= '\0';
-	return new Ast(AST_TYPE.STR, buf.to!string,  strings);
 }
 
 Ast read_expr2(int prec) {
-	skip_space();
 	Ast ast = read_prim();
 	if (ast is null) {
 		return null;
 	}
-	while (true) {
-		skip_space();
-		dchar c;
-		if (!readf("%c", c)) {
+	for(;;) {
+		Token tok = read_token();
+		if (tok.type != TOKEN_TYPE.PUNCT) {
+			unget_token(tok);
 			return ast;
 		}
-		int prec2 = priority(cast(char)c);
+		int prec2 = priority(tok.punct);
 		if (prec2 < 0 || prec2 < prec) {
-			ungetc(cast(char)c, stdin.getFP);
+			unget_token(tok);
 			return ast;
 		}
-		skip_space();
-		ast = new Ast(cast(char)c, ast, read_expr2(prec2+1));
+		ast = new Ast(tok.punct, ast, read_expr2(prec2+1));
 	}
 }
 
-string read_ident(dchar c) {
-	dchar[] buf;
-	buf ~= c;
-	while (true) {
-		if (!readf("%c", c)) {
-			stderr.writeln("Unterminated string");
-			exit(1);
-		}
-		if (! c.isAlphaNum) {
-			ungetc(cast(char)c, stdin.getFP);
-			break;
-		}
-		buf ~= c;
-	}
-	buf ~= '\0';
-	return buf.to!string;
-}
 Ast read_func_args(string fname) {
 	Ast[] args;
 	while (true) {
-		skip_space();
-		dchar c;
-		readf("%c", c);
-		if (c == ')') {
+		Token tok = read_token();
+		if (is_punct(tok, ')')) {
 			break;
 		}
-		ungetc(cast(char)c, stdin.getFP);
+		unget_token(tok);
 		args ~= read_expr2(0);
-		readf("%c", c);
-		if (c == ')') {
+		tok = read_token();
+		if (is_punct(tok, ')')) {
 			break;
 		}
-		if (c == ',') {
-			skip_space();
-		}
-		else {
-			stderr.writefln("Unexpected character : '%c'", c);
-			exit(1);
+		if (!is_punct(tok, ',')) {
+			error("Unexpected token: '%s'", tok);
 		}
 	}
 	if (args.length > REGS.length) {
-		stderr.writefln("Too many arguments: %s", fname);
-		exit(1);
+		error("Too many arguments: %s", fname);
 	}
 
 	return new Ast(fname, args);
 }
-Ast read_ident_or_func(dchar c) {
-	string name = read_ident(c);
-	skip_space();
-	dchar c2;
-	readf("%c", c2);
-	if (c2 == '(') {
+Ast read_ident_or_func(string name) {
+	Token tok = read_token();
+	if (is_punct(tok, '(')) {
 		return read_func_args(name);
 	}
-	ungetc(cast(char)c2, stdin.getFP);
+	unget_token(tok);
 	Ast v = find_var(name);
-	return v ? v : new Ast(AST_TYPE.VAR, name, vars);
+	return (v !is null) ?  v : new Ast(AST_TYPE.VAR, name, vars);
+
 }
 
 Ast read_expr() {
@@ -307,12 +206,9 @@ Ast read_expr() {
 	if (r is null) {
 		return null;
 	}
-	skip_space();
-	dchar c;
-	readf("%c", c);
-	if (c != ';') {
-		stderr.writefln("Unterminated expression. Expected ; but '%c' got", c);
-		exit(1);
+	Token tok = read_token();
+	if (! is_punct(tok, ';')) {
+		error("Unterminated expression: %s", tok);
 	}
 	return r;
 }
@@ -329,8 +225,7 @@ void emit_binop(Ast ast) {
 	if (ast.type == '=') {
 		emit_expr(ast.right);
 		if (ast.left.type != AST_TYPE.VAR) {
-			stderr.writeln("Symbol expected");
-			exit(1);
+			error("Symbol expected");
 		}
 		writefln("mov %%eax, -%d(%%rbp)\n\t", ast.left.vpos*4);
 		return;
@@ -349,8 +244,7 @@ void emit_binop(Ast ast) {
 		case '/':
 			break;
 		default:
-			stderr.writefln("invalid operator '%c'", ast.type);
-			exit(1);
+			error("invalid operator '%c'", ast.type);
 			break;
 	}
 

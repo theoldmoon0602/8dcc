@@ -9,37 +9,35 @@ import core.stdc.stdio : ungetc;
 
 enum AST_TYPE : int {
 	INT = -1,
-	SYM = -2,
+	VAR = -2,
 	STR = -3,
 	FUNCALL = -4,
 }
 
-class Var {
-	string name;
-	int pos;
-	Var next;
-	this(string name, ref Var vars) {
-		this.name = name;
-		this.pos = vars ? vars.pos+1 : 1;
-		this.next = vars;
-		vars = this;
-	}
-}
 
 class Ast {
 	int type;
 	union {
+		// INT
 		int ival;
+		// STR
 		struct {
 			string sval;
 			int sid;
 			Ast snext;
 		}
-		Var var;
+		// VAR
+		struct {
+			string vname;
+			int vpos;
+			Ast vnext;
+		}
+		// BINOP
 		struct {
 			Ast left;
 			Ast right;
 		}
+		// FUNCALL
 		struct {
 			string fname;
 			Ast[] args;
@@ -55,16 +53,24 @@ class Ast {
 		this.type = AST_TYPE.INT;
 		this.ival = val;
 	}
-	this(Var var) {
-		this.type = AST_TYPE.SYM;
-		this.var = var;
-	}
 	this(string fname, Ast[] args) {
 		this.type = AST_TYPE.FUNCALL;
 		this.fname = fname;
 		this.args = args;
 	}
-	this(string str, ref Ast strings) {
+	this(int type, string str, ref Ast strings) {
+		if (type == AST_TYPE.STR) {
+			init_string(str, strings);
+		}
+		else if (type == AST_TYPE.VAR) {
+			init_var(str, strings);
+		}
+		else {
+			stderr.writeln("Unexpected type");
+			exit(1);
+		}
+	}
+	void init_string(string str, ref Ast strings) {
 		this.type = AST_TYPE.STR;
 		this.sval = str;
 		if (strings is null) {
@@ -77,15 +83,22 @@ class Ast {
 		}
 		strings = this;
 	}
+	void init_var(string vname, ref Ast vars) {
+		this.type =AST_TYPE.VAR;
+		this.vname = vname;
+		this.vpos = vars ? vars.vpos + 1 : 0;
+		this.vnext = vars;
+		vars = this;
+	}
 }
-Var vars = null;
+Ast vars = null;
 Ast strings = null;
 string[] REGS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
 
-Var find_var(string name) {
-	for (Var v = vars; v; v = v.next) {
-		if (name == v.name) {
+Ast find_var(string name) {
+	for (Ast v = vars; v; v = v.vnext) {
+		if (name == v.vname) {
 			return v;
 		}
 	}
@@ -170,7 +183,7 @@ Ast read_string() {
 		buf ~= c;
 	}
 	buf ~= '\0';
-	return new Ast(buf.to!string,  strings);
+	return new Ast(AST_TYPE.STR, buf.to!string,  strings);
 }
 
 Ast read_expr2(int prec) {
@@ -251,11 +264,8 @@ Ast read_ident_or_func(dchar c) {
 		return read_func_args(name);
 	}
 	ungetc(cast(char)c2, stdin.getFP);
-	Var v = find_var(name);
-	if (v is null) {
-		v = new Var(name, vars);
-	}
-	return new Ast(v);
+	Ast v = find_var(name);
+	return v ? v : new Ast(AST_TYPE.VAR, name, vars);
 }
 
 Ast read_expr() {
@@ -284,11 +294,11 @@ void print_quote(string s) {
 void emit_binop(Ast ast) {
 	if (ast.type == '=') {
 		emit_expr(ast.right);
-		if (ast.left.type != AST_TYPE.SYM) {
+		if (ast.left.type != AST_TYPE.VAR) {
 			stderr.writeln("Symbol expected");
 			exit(1);
 		}
-		writefln("mov %%eax, -%d(%%rbp)\n\t", ast.left.var.pos*4);
+		writefln("mov %%eax, -%d(%%rbp)\n\t", ast.left.vpos*4);
 		return;
 	}
 	string op;
@@ -329,8 +339,8 @@ void emit_expr(Ast ast) {
 		case AST_TYPE.INT:
 			writef("mov $%d, %%eax\n\t", ast.ival);
 			break;
-		case AST_TYPE.SYM:
-			writef("mov -%d(%%rbp), %%eax\n\t", ast.var.pos*4);
+		case AST_TYPE.VAR:
+			writef("mov -%d(%%rbp), %%eax\n\t", ast.vpos*4);
 			break;
 		case AST_TYPE.STR:
 			writef("lea .s%s(%%rip), %%eax\n\t", ast.sid);
@@ -366,8 +376,8 @@ void print_ast(Ast ast) {
 		case AST_TYPE.INT:
 			writef("%d", ast.ival);
 			break;
-		case AST_TYPE.SYM:
-			writef("%s", ast.var.name);
+		case AST_TYPE.VAR:
+			writef("%s", ast.vname);
 			break;
 		case AST_TYPE.STR:
 			write("\"");

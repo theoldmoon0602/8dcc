@@ -12,6 +12,7 @@ enum AST_TYPE : int {
 	VAR = -2,
 	STR = -3,
 	FUNCALL = -4,
+	CHAR = -5,
 }
 
 
@@ -20,6 +21,8 @@ class Ast {
 	union {
 		// INT
 		int ival;
+		// CHAR;
+		char c;
 		// STR
 		struct {
 			string sval;
@@ -57,6 +60,10 @@ class Ast {
 		this.type = AST_TYPE.FUNCALL;
 		this.fname = fname;
 		this.args = args;
+	}
+	this(char c) {
+		this.type = AST_TYPE.CHAR;
+		this.c = c;
 	}
 	this(int type, string str, ref Ast strings) {
 		if (type == AST_TYPE.STR) {
@@ -156,10 +163,37 @@ Ast read_prim() {
 	else if (c == '"') {
 		return read_string();
 	}
+	else if (c == '\'') {
+		return read_char();
+	}
 	else if (c.isAlpha) {
 		return read_ident_or_func(c);
 	}
 	stderr.writefln("Don't know how to handle '%c'", c);
+	exit(1);
+	return null;
+}
+Ast read_char() {
+	dchar c;
+	dchar c2;
+	if (!readf("%c", c)) {
+		goto err;
+	}
+	if (c == '\\') {
+		if (!readf("%c", c)) {
+			goto err;
+		}
+	}
+	if (!readf("%c", c2)) {
+		goto err;
+	}
+	if (c2 != '\'') {
+		stderr.writefln("Malformed char constant");
+		exit(1);
+	}
+	return new Ast(cast(char)c);
+err:
+	stderr.writefln("Unterminated char");
 	exit(1);
 	return null;
 }
@@ -339,6 +373,9 @@ void emit_expr(Ast ast) {
 		case AST_TYPE.INT:
 			writef("mov $%d, %%eax\n\t", ast.ival);
 			break;
+		case AST_TYPE.CHAR:
+			writef("mov $%d, %%eax\n\t", ast.c);
+			break;
 		case AST_TYPE.VAR:
 			writef("mov -%d(%%rbp), %%eax\n\t", ast.vpos*4);
 			break;
@@ -375,6 +412,9 @@ void print_ast(Ast ast) {
 	switch(ast.type) {
 		case AST_TYPE.INT:
 			writef("%d", ast.ival);
+			break;
+		case AST_TYPE.CHAR:
+			writef("'%c'", ast.c);
 			break;
 		case AST_TYPE.VAR:
 			writef("%s", ast.vname);

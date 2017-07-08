@@ -7,10 +7,11 @@ import core.stdc.stdlib;
 import core.stdc.stdio : ungetc;
 
 
-enum AST_TYPE : char{
-	INT = 253,
-	SYM,
-	FUNCALL,
+enum AST_TYPE : int {
+	INT = -1,
+	SYM = -2,
+	STR = -3,
+	FUNCALL = -4,
 }
 
 class Var {
@@ -26,9 +27,14 @@ class Var {
 }
 
 class Ast {
-	char type;
+	int type;
 	union {
 		int ival;
+		struct {
+			string sval;
+			int sid;
+			Ast snext;
+		}
 		Var var;
 		struct {
 			Ast left;
@@ -58,8 +64,22 @@ class Ast {
 		this.fname = fname;
 		this.args = args;
 	}
+	this(string str, ref Ast strings) {
+		this.type = AST_TYPE.STR;
+		this.sval = str;
+		if (strings is null) {
+			this.sid = 0;
+			this.snext = null;
+		}
+		else {
+			this.sid = strings.sid+1;
+			this.snext = strings;
+		}
+		strings = this;
+	}
 }
 Var vars = null;
+Ast strings = null;
 string[] REGS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
 
@@ -120,12 +140,37 @@ Ast read_prim() {
 	else if (c.isNumber) {
 		return read_number(cast(int)(c - '0'));
 	}
+	else if (c == '"') {
+		return read_string();
+	}
 	else if (c.isAlpha) {
 		return read_ident_or_func(c);
 	}
 	stderr.writefln("Don't know how to handle '%c'", c);
 	exit(1);
 	return null;
+}
+Ast read_string() {
+	dchar[] buf;
+	while (true) {
+		dchar c;
+		if (! readf("%c", c)) {
+			stderr.writeln("Unterminated string");
+			exit(1);
+		}
+		if (c == '"') {
+			break;
+		}
+		if (c == '\\') {
+			if (! readf("%c", c)) {
+				stderr.writeln("Unterminated string");
+				exit(1);
+			}
+		}
+		buf ~= c;
+	}
+	buf ~= '\0';
+	return new Ast(buf.to!string,  strings);
 }
 
 Ast read_expr2(int prec) {
@@ -287,6 +332,9 @@ void emit_expr(Ast ast) {
 		case AST_TYPE.SYM:
 			writef("mov -%d(%%rbp), %%eax\n\t", ast.var.pos*4);
 			break;
+		case AST_TYPE.STR:
+			writef("lea .s%s(%%rip), %%eax\n\t", ast.sid);
+			break;
 		case AST_TYPE.FUNCALL:
 			// レジスタの値を退避
 			for (int i = 1; i < ast.args.length; i++) {
@@ -321,6 +369,11 @@ void print_ast(Ast ast) {
 		case AST_TYPE.SYM:
 			writef("%s", ast.var.name);
 			break;
+		case AST_TYPE.STR:
+			write("\"");
+			print_quote(ast.sval);
+			write("\"");
+			break;
 		case AST_TYPE.FUNCALL:
 			writef("%s(", ast.fname);
 			for (int i = 0; i < ast.args.length; i++) {
@@ -332,7 +385,7 @@ void print_ast(Ast ast) {
 			write(")");
 			break;
 		default:
-			writef("(%c ", ast.type);
+			writef("(%c ", cast(char)ast.type);
 			print_ast(ast.left);
 			write(" ");
 			print_ast(ast.right);
@@ -340,25 +393,41 @@ void print_ast(Ast ast) {
 			break;
 	}
 }
+void emit_data_section() {
+	if (strings is null) {
+		return;
+	}
+	write("\t.data\n");
+	for (Ast p = strings; p; p = p.snext)  {
+		writef(".s%d:\n\t", p.sid);
+		writef(".string \""); print_quote(p.sval); writef("\"\n");
+	}
+	write("\t");
+}
 
 int main(string[] args)
 {
 	auto wantast = (args.length > 1 && args[1] == "-a");
+	Ast[] exprs;
+	while (true) {
+		Ast t = read_expr();
+		if (t is null) {
+			break;
+		}
+		exprs ~= t;
+	}
 	if (!wantast) {
+		emit_data_section();
 		write(".text\n\t"~
 			".global mymain\n"~
 			"mymain:\n\t");
 	}
-	while (true) {
-		Ast ast = read_expr();
-		if (ast is null) {
-			break;
-		}
+	foreach(expr; exprs) {
 		if (wantast) {
-			print_ast(ast);
+			print_ast(expr);
 		}
 		else {
-			emit_expr(ast);
+			emit_expr(expr);
 		}
 	}
 	if (!wantast) {

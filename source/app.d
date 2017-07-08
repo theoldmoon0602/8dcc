@@ -2,6 +2,8 @@ import std.stdio;
 import std.string;
 import std.conv;
 import std.uni;
+import std.algorithm;
+import std.format;
 
 import d8cc;
 
@@ -61,22 +63,26 @@ class Ast {
 		Ast decl_init;
 	}
 	this() {}
-	this(char type, Ast left, Ast right) {
+	this(int type, int ctype, Ast left, Ast right) {
 		this.type = type;
+		this.ctype = ctype;
 		this.left = left;
 		this.right = right;
 	}
 	this(int val) {
 		this.type = AST_TYPE.INT;
+		this.ctype = CTYPE.INT;
 		this.ival = val;
 	}
 	this(string fname, Ast[] args) {
 		this.type = AST_TYPE.FUNCALL;
+		this.ctype = CTYPE.INT;
 		this.fname = fname;
 		this.args = args;
 	}
 	this(char c) {
 		this.type = AST_TYPE.CHAR;
+		this.ctype = CTYPE.CHAR;
 		this.c = c;
 	}
 	this(Ast var, Ast init) {
@@ -109,6 +115,35 @@ class Ast {
 		vars = ast;
 		return ast;
 	}
+	override string toString () {
+		switch(this.type) {
+		case AST_TYPE.INT:
+			return "%d".format(this.ival);
+		case AST_TYPE.CHAR:
+			return "'%c'".format(this.c);
+		case AST_TYPE.VAR:
+			return "%s".format(this.vname);
+		case AST_TYPE.STR:
+			return "\"%s\"".format(quote(this.sval));
+		case AST_TYPE.FUNCALL:
+			{
+				char[] buf;
+				buf ~= "%s(".format(this.fname);
+				for (int i = 0; i < this.args.length; i++) {
+					buf ~= this.args[i].toString;
+					if (i+1 < this.args.length) {
+						buf ~= ",";
+					}
+				}
+				buf ~= ")";
+				return buf.to!string;
+		       }
+		case AST_TYPE.DECL:
+			return "(decl %s %s %s)".format((cast(CTYPE)this.decl_var.ctype).to!string.toLower, this.decl_var.vname, this.decl_init);
+		default:
+			return "(%c %s %s)".format(cast(char)this.type, this.left, this.right);
+	}
+}
 }
 Ast vars = null;
 Ast strings = null;
@@ -122,6 +157,9 @@ Ast find_var(string name) {
 		}
 	}
 	return null;
+}
+bool is_right_assoc(char op) {
+	return op == '=';
 }
 int priority(char op) {
 	switch(op) {
@@ -155,11 +193,57 @@ Ast read_prim() {
 		case TOKEN_TYPE.STRING:
 			return Ast.newStr(tok.sval, strings);
 		case TOKEN_TYPE.PUNCT:
-			error("unexpected character: '%c'", tok.punct);
+			auto p = tok.punct;
+			error!("unexpected character: '%c'", p);
+			break;
 	}
 	return null;
 }
-
+char result_type(char op, Ast a, Ast b) {
+	bool swapped = false;
+	if (a.ctype > b.ctype) {
+		swapped = true;
+		swap(a, b);
+	}
+	switch (a.ctype) {
+		case CTYPE.VOID:
+			goto err;
+		case CTYPE.INT:
+			switch(b.ctype) {
+				case CTYPE.INT:
+				case CTYPE.CHAR:
+					return CTYPE.INT;
+				case CTYPE.STR:
+					goto err;
+				default:
+					break;
+			}
+			error!("internal error");
+			break;
+		case CTYPE.CHAR:
+			switch (b.ctype) {
+				case CTYPE.CHAR:
+					return CTYPE.INT;
+				case CTYPE.STR:
+					goto err;
+				default:
+					break;
+			}
+			error!("internal error");
+			break;
+		case CTYPE.STR:
+			goto err;
+		default:
+			error!("internal error");
+			break;
+	}
+err:
+	if (swapped) {
+		swap(a, b);
+	}
+	error!("incompatible operands: %s and %s for %c", a, b, op);
+	return 0;
+}
 Ast read_expr(int prec) {
 	Ast ast = read_prim();
 	if (ast is null) {
@@ -179,7 +263,9 @@ Ast read_expr(int prec) {
 		if (is_punct(tok, '=')) {
 			ensure_lvalue(ast);
 		}
-		ast = new Ast(tok.punct, ast, read_expr(prec2+1));
+		Ast rest = read_expr(prec2 + (is_right_assoc(tok.punct) ? 0 : 1));
+		auto ctype = result_type(tok.punct, ast, rest);
+		ast = new Ast(tok.punct, ctype, ast, rest);
 	}
 }
 
@@ -197,11 +283,11 @@ Ast read_func_args(string fname) {
 			break;
 		}
 		if (!is_punct(tok, ',')) {
-			error("Unexpected token: '%s'", tok);
+			error!("Unexpected token: '%s'", tok);
 		}
 	}
 	if (args.length > REGS.length) {
-		error("Too many arguments: %s", fname);
+		error!("Too many arguments: %s", fname);
 	}
 
 	return new Ast(fname, args);
@@ -214,14 +300,14 @@ Ast read_ident_or_func(string name) {
 	unget_token(tok);
 	Ast v = find_var(name);
 	if (v is null) {
-		error("Undefined variable: %s", name);
+		error!("Undefined variable: %s", name);
 	}
 	return v;
 }
 
 void ensure_lvalue(Ast ast) {
 	if (ast.type != AST_TYPE.VAR) {
-		error("variable expected");
+		error!("variable expected");
 	}
 }
 
@@ -249,14 +335,14 @@ bool is_type_keyword(Token tok) {
 void expect(char punct) {
 	Token tok = read_token();
 	if (! is_punct(tok, punct)) {
-		error("'%c' expected, but got %s", punct, tok);
+		error!("'%c' expected, but got %s", punct, tok);
 	}
 }
 Ast read_decl() {
 	int ctype = get_ctype(read_token());
 	Token name = read_token();
 	if (name.type != TOKEN_TYPE.IDENT) {
-		error("Identifier expected, but got %s", name);
+		error!("Identifier expected, but got %s", name);
 	}
 	Ast var = Ast.newVar(ctype, name.sval, vars);
 	expect('=');
@@ -271,18 +357,20 @@ Ast read_decl_or_stmt() {
 	Ast r = is_type_keyword(tok) ? read_decl() : read_expr(0);
 	tok = read_token();
 	if (!is_punct(tok, ';')) {
-		error("Unterminated expression: %s", tok);
+		error!("Unterminated expression: %s", tok);
 	}
 	return r;
 }
 
-void print_quote(string s) {
+string quote(string s) {
+	char[]buf;
 	foreach(c; s) {
 		if (c == '\"' || c == '\\') {
-			write("\\");
+			buf ~="\\";
 		}
-		writef("%c", c);
+		buf ~= "%c".format(c);
 	}
+	return buf.to!string;
 }
 void emit_assign(Ast var, Ast value) {
 	emit_expr(value);
@@ -307,7 +395,8 @@ void emit_binop(Ast ast) {
 		case '/':
 			break;
 		default:
-			error("invalid operator '%c'", ast.type);
+			auto t= ast.type;
+			error!("invalid operator '%c'", t);
 			break;
 	}
 
@@ -369,46 +458,6 @@ void emit_expr(Ast ast) {
 	}
 }
 
-void print_ast(Ast ast) {
-	switch(ast.type) {
-		case AST_TYPE.INT:
-			writef("%d", ast.ival);
-			break;
-		case AST_TYPE.CHAR:
-			writef("'%c'", ast.c);
-			break;
-		case AST_TYPE.VAR:
-			writef("%s", ast.vname);
-			break;
-		case AST_TYPE.STR:
-			write("\"");
-			print_quote(ast.sval);
-			write("\"");
-			break;
-		case AST_TYPE.FUNCALL:
-			writef("%s(", ast.fname);
-			for (int i = 0; i < ast.args.length; i++) {
-				print_ast(ast.args[i]);
-				if (i+1 < ast.args.length) {
-					write(",");
-				}
-			}
-			write(")");
-			break;
-		case AST_TYPE.DECL:
-			writef("(decl %s %s ", (cast(CTYPE)ast.decl_var.ctype).to!string.toLower, ast.decl_var.vname);
-			print_ast(ast.decl_init);
-			write(")");
-			break;
-		default:
-			writef("(%c ", cast(char)ast.type);
-			print_ast(ast.left);
-			write(" ");
-			print_ast(ast.right);
-			write(")");
-			break;
-	}
-}
 void emit_data_section() {
 	if (strings is null) {
 		return;
@@ -416,7 +465,7 @@ void emit_data_section() {
 	write("\t.data\n");
 	for (Ast p = strings; p; p = p.snext)  {
 		writef(".s%d:\n\t", p.sid);
-		writef(".string \""); print_quote(p.sval); writef("\"\n");
+		writef(".string \"%s\"\n", quote(p.sval));
 	}
 	write("\t");
 }
@@ -440,7 +489,7 @@ int main(string[] args)
 	}
 	foreach(expr; exprs) {
 		if (wantast) {
-			print_ast(expr);
+			writeln(expr);
 		}
 		else {
 			emit_expr(expr);

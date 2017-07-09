@@ -22,7 +22,7 @@ enum CTYPE: int {
 	VOID,
 	INT,
 	CHAR,
-	STR,
+	ARRAY,
 	PTR,
 }
 
@@ -41,11 +41,11 @@ class Ctype {
 	}
 	static Ctype INT;
 	static Ctype CHAR;
-	static Ctype STR;
+	static Ctype ARRAY;
 	static this() {
 		INT = new Ctype(CTYPE.INT, null);
 		CHAR = new Ctype(CTYPE.CHAR, null);
-		STR = new Ctype(CTYPE.STR, null);
+		ARRAY = new Ctype(Ctype.ARRAY, null);
 	}
 	override string toString() {
 		if (this.type == CTYPE.PTR) {
@@ -131,7 +131,7 @@ class Ast {
 	static Ast newStr(string str, ref Ast strings) {
 		Ast ast = new Ast();
 		ast.type = AST_TYPE.LITERAL;
-		ast.ctype = Ctype.STR;
+		ast.ctype = Ctype.ARRAY;
 		ast.sval = str;
 		if (strings is null) {
 			ast.sid = 0;
@@ -251,44 +251,29 @@ Ast read_prim() {
 	}
 	return null;
 }
-Ctype result_type_int(Ctype a, Ctype b) {
-	if (a.type == CTYPE.PTR) {
-		if (b.type != CTYPE.PTR) {
-			throw new Exception("");
-		}
-		return new Ctype(CTYPE.PTR, result_type_int(a.ptr, b.ptr));
-	}
+Ctype result_type_int(char op, Ctype a, Ctype b) {
 	if (a.type > b.type) {
 		swap(a, b);
+	}
+	if (b.type == CTYPE.PTR) {
+		if (op != '+' && op != '-')  {
+			throw new Exception("");
+		}
+		if (a.type != CTYPE.PTR) {
+			warn!("Making a pointer from %s", a);
+			return b;
+		}
+
+		return new Ctype(CTYPE.PTR, result_type_int(op, a.ptr, b.ptr));
 	}
 	switch (a.type) {
 		case CTYPE.VOID:
 			throw new Exception("");
 		case CTYPE.INT:
-			switch(b.type) {
-				case CTYPE.INT:
-				case CTYPE.CHAR:
-					return Ctype.INT;
-				case CTYPE.STR:
-					throw new Exception("");
-				default:
-					break;
-			}
-			error!("internal error");
-			break;
 		case CTYPE.CHAR:
-			switch (b.type) {
-				case CTYPE.CHAR:
-					return Ctype.INT;
-				case CTYPE.STR:
-					throw new Exception("");
-				default:
-					break;
-			}
-			error!("internal error");
-			break;
-		case CTYPE.STR:
-			throw new Exception("");
+			return Ctype.INT;
+		case CTYPE.ARRAY:
+			return result_type_int(op, new Ctype(a.ptr), b);
 		default:
 			error!("internal error");
 			break;
@@ -342,6 +327,9 @@ Ast read_expr(int prec) {
 		}
 		Ast rest = read_expr(prec2 + (is_right_assoc(tok.punct) ? 0 : 1));
 		auto ctype = result_type(tok.punct, ast, rest);
+		if (ctype.type == CTYPE.PTR && ast.ctype.type != CTYPE) {
+			swap(ast, rest);
+		}
 		ast = new Ast(tok.punct, ctype, ast, rest);
 	}
 }
@@ -415,9 +403,6 @@ Ctype get_ctype(Token tok) {
 	if (tok.sval == "char") {
 		return Ctype.CHAR;
 	}
-	if (tok.sval == "string") {
-		return Ctype.STR;
-	}
 
 	return null;
 }
@@ -477,11 +462,40 @@ void emit_assign(Ast var, Ast value) {
 	emit_expr(value);
 	writef("mov %%rax, -%d(%%rbp)\n\t", var.vpos * 8);
 }
+int ctype_shift(Ctype ctype) {
+	switch(ctype.type) 
+	{
+		case CTYPE.CHAR: return 0;
+		case CTYPE.INT: return 2;
+		default: return 3;
+	}
+}
+int size(Ctype ctype) {
+	return 1 << ctype.ctype_shift;
+}
+void emit_pointer_arith(char op, Ast left, Ast right) {
+	assert(left.ctype.type == CTYPE.PTR);
+	emit_expr(left);
+	write("push %rax\n\t");
+	emit_expr(right);
+	int shift = left.ctype.ctype_shift;
+	if (shift > 0) {
+		writef("sal $%d, %%rax\n\t", shift);
+	}
+	write("mov %rax, %rbx\n\t"~
+		"pop %rax\n\t"~
+		"add %rbx, %rax\n\t");
+}
 void emit_binop(Ast ast) {
 	if (ast.type == '=') {
 		emit_assign(ast.left, ast.right);
 		return;
 	}
+	if (ast.ctype.type == CTYPE.PTR) {
+		emit_pointer_arith(ast.type, ast.left, ast.right);
+		return;
+	}
+
 	string op;
 	switch (ast.type) {
 		case '+':
@@ -520,12 +534,12 @@ void emit_expr(Ast ast) {
 		case AST_TYPE.LITERAL:
 			switch(ast.ctype.type) {
 				case CTYPE.INT:
-					writef("mov $%d, %%rax\n\t", ast.ival);
+					writef("mov $%d, %%eax\n\t", ast.ival);
 					break;
 				case CTYPE.CHAR:
 					writef("mov $%d, %%rax\n\t", ast.c);
 					break;
-				case CTYPE.STR:
+				case CTYPE.ARRAY:
 					writef("lea .s%d(%%rip), %%rax\n\t", ast.sid);
 					break;
 				default:
@@ -534,6 +548,13 @@ void emit_expr(Ast ast) {
 			}
 			break;
 		case AST_TYPE.VAR:
+			switch (ast.ctype.size) {
+				case 1:
+					write("mov $0, %%eax\n\t");
+					writef("mov -%d(%%rbp), %%al\n\t", ast.vpos * 8);
+					break;
+					case 
+			}
 			writef("mov -%d(%%rbp), %%rax\n\t", ast.vpos*8);
 			break;
 		case AST_TYPE.FUNCALL:

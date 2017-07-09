@@ -10,25 +10,53 @@ import d8cc;
 
 
 enum AST_TYPE : int {
-	INT = -1,
+	LITERAL = -1,
 	VAR = -2,
-	STR = -3,
-	FUNCALL = -4,
-	CHAR = -5,
-	DECL = -6,
+	FUNCALL = -3,
+	DECL = -4,
+	ADDR = -5,
+	DEREF = -6,
 }
 
 enum CTYPE: int {
 	VOID,
 	INT,
 	CHAR,
-	STR
+	STR,
+	PTR,
 }
 
 
+class Ctype {
+	int type;
+	Ctype ptr;
+
+	this(int type, Ctype ptr) {
+		this.type = type;
+		this.ptr = ptr;
+	}
+
+	this(Ctype ctype) {
+		this(CTYPE.PTR, ctype);
+	}
+	static Ctype INT;
+	static Ctype CHAR;
+	static Ctype STR;
+	static this() {
+		INT = new Ctype(CTYPE.INT, null);
+		CHAR = new Ctype(CTYPE.CHAR, null);
+		STR = new Ctype(CTYPE.STR, null);
+	}
+	override string toString() {
+		if (this.type == CTYPE.PTR) {
+			return "%s*".format(ptr);
+		}
+		return (cast(CTYPE)(type)).to!string.toLower;
+	}
+}
 class Ast {
 	int type;
-	int ctype;
+	Ctype ctype;
 	union {
 		// INT
 		int ival;
@@ -51,6 +79,10 @@ class Ast {
 			Ast left;
 			Ast right;
 		}
+		// Unary operator
+		struct {
+			Ast operand;
+		}
 		// FUNCALL
 		struct {
 			string fname;
@@ -63,36 +95,43 @@ class Ast {
 		Ast decl_init;
 	}
 	this() {}
-	this(int type, int ctype, Ast left, Ast right) {
+	this(int type, Ctype ctype, Ast left, Ast right) {
 		this.type = type;
 		this.ctype = ctype;
 		this.left = left;
 		this.right = right;
 	}
+	this(int type, Ctype ctype, Ast operand) {
+		this.type = type;
+		this.ctype = ctype;
+		this.operand = operand;
+	}
 	this(int val) {
-		this.type = AST_TYPE.INT;
-		this.ctype = CTYPE.INT;
+		this.type = AST_TYPE.LITERAL;
+		this.ctype = Ctype.INT;
 		this.ival = val;
 	}
 	this(string fname, Ast[] args) {
 		this.type = AST_TYPE.FUNCALL;
-		this.ctype = CTYPE.INT;
+		this.ctype = Ctype.INT;
 		this.fname = fname;
 		this.args = args;
 	}
 	this(char c) {
-		this.type = AST_TYPE.CHAR;
-		this.ctype = CTYPE.CHAR;
+		this.type = AST_TYPE.LITERAL;
+		this.ctype = Ctype.CHAR;
 		this.c = c;
 	}
 	this(Ast var, Ast init) {
 		this.type = AST_TYPE.DECL;
+		this.ctype = null;
 		this.decl_var = var;
 		this.decl_init = init;
 	}
 	static Ast newStr(string str, ref Ast strings) {
 		Ast ast = new Ast();
-		ast.type = AST_TYPE.STR;
+		ast.type = AST_TYPE.LITERAL;
+		ast.ctype = Ctype.STR;
 		ast.sval = str;
 		if (strings is null) {
 			ast.sid = 0;
@@ -105,7 +144,7 @@ class Ast {
 		strings = ast;
 		return ast;
 	}
-	static Ast newVar(int ctype, string vname, ref Ast vars) {
+	static Ast newVar(Ctype ctype, string vname, ref Ast vars) {
 		Ast ast = new Ast();
 		ast.type = AST_TYPE.VAR;
 		ast.ctype = ctype;
@@ -117,14 +156,21 @@ class Ast {
 	}
 	override string toString () {
 		switch(this.type) {
-		case AST_TYPE.INT:
-			return "%d".format(this.ival);
-		case AST_TYPE.CHAR:
-			return "'%c'".format(this.c);
+		case AST_TYPE.LITERAL:
+			switch(ctype.type) {
+				case CTYPE.INT:
+					return "%d".format(this.ival);
+				case CTYPE.CHAR:
+					return "'%c'".format(this.c);
+				case CTYPE.STR:
+					return "\"%s\"".format(quote(this.sval));
+				default:
+					error!("internal error");
+					break;
+			}
+			break;
 		case AST_TYPE.VAR:
 			return "%s".format(this.vname);
-		case AST_TYPE.STR:
-			return "\"%s\"".format(quote(this.sval));
 		case AST_TYPE.FUNCALL:
 			{
 				char[] buf;
@@ -139,11 +185,17 @@ class Ast {
 				return buf.to!string;
 		       }
 		case AST_TYPE.DECL:
-			return "(decl %s %s %s)".format((cast(CTYPE)this.decl_var.ctype).to!string.toLower, this.decl_var.vname, this.decl_init);
+			return "(decl %s %s %s)".format(this.decl_var.ctype, this.decl_var.vname, this.decl_init);
+		case AST_TYPE.ADDR:
+			return "(& %s)".format(this.operand);
+		case AST_TYPE.DEREF:
+			return "(* %s)".format(this.operand);
 		default:
 			return "(%c %s %s)".format(cast(char)this.type, this.left, this.right);
+		}
+		error!("internal error");
+		return "";
 	}
-}
 }
 Ast vars = null;
 Ast strings = null;
@@ -199,53 +251,78 @@ Ast read_prim() {
 	}
 	return null;
 }
-char result_type(char op, Ast a, Ast b) {
-	bool swapped = false;
-	if (a.ctype > b.ctype) {
-		swapped = true;
+Ctype result_type_int(Ctype a, Ctype b) {
+	if (a.type == CTYPE.PTR) {
+		if (b.type != CTYPE.PTR) {
+			throw new Exception("");
+		}
+		return new Ctype(CTYPE.PTR, result_type_int(a.ptr, b.ptr));
+	}
+	if (a.type > b.type) {
 		swap(a, b);
 	}
-	switch (a.ctype) {
+	switch (a.type) {
 		case CTYPE.VOID:
-			goto err;
+			throw new Exception("");
 		case CTYPE.INT:
-			switch(b.ctype) {
+			switch(b.type) {
 				case CTYPE.INT:
 				case CTYPE.CHAR:
-					return CTYPE.INT;
+					return Ctype.INT;
 				case CTYPE.STR:
-					goto err;
+					throw new Exception("");
 				default:
 					break;
 			}
 			error!("internal error");
 			break;
 		case CTYPE.CHAR:
-			switch (b.ctype) {
+			switch (b.type) {
 				case CTYPE.CHAR:
-					return CTYPE.INT;
+					return Ctype.INT;
 				case CTYPE.STR:
-					goto err;
+					throw new Exception("");
 				default:
 					break;
 			}
 			error!("internal error");
 			break;
 		case CTYPE.STR:
-			goto err;
+			throw new Exception("");
 		default:
 			error!("internal error");
 			break;
 	}
-err:
-	if (swapped) {
-		swap(a, b);
+	return null;
+}
+Ctype result_type(char op, Ast a, Ast b) {
+	try { 
+		return result_type_int(a.ctype, b.ctype);
 	}
-	error!("incompatible operands: %s and %s for %c", a, b, op);
-	return 0;
+	catch (Exception e) {
+		error!("incompatible operands: %c: <%s> and <%s>", op, a, b);
+	}
+	return null;
+}
+Ast read_unary_opeartor() {
+	Token tok = read_token();
+	if (tok.is_punct('&')) {
+		Ast operand = read_unary_expr();
+		ensure_lvalue(operand);
+		return new Ast(AST_TYPE.ADDR, new Ctype(operand.ctype), operand);
+	}
+	if (tok.is_punct('*')) {
+		Ast operand = read_unary_expr();
+		if (operand.ctype.type != CTYPE.PTR) {
+			error!("pointer type expected, but got %s", operand);
+		}
+		return new Ast(AST_TYPE.DEREF, operand.ctype.ptr, operand);
+	}
+	unget_token(tok);
+	return read_prim();
 }
 Ast read_expr(int prec) {
-	Ast ast = read_prim();
+	Ast ast = read_unary_expr();
 	if (ast is null) {
 		return null;
 	}
@@ -307,29 +384,46 @@ Ast read_ident_or_func(string name) {
 
 void ensure_lvalue(Ast ast) {
 	if (ast.type != AST_TYPE.VAR) {
-		error!("variable expected");
+		error!("lvalue expected, but got %s", ast);
 	}
 }
+Ast read_unary_expr() {
+	Token tok = read_token();
+	if(tok.is_punct('&')) {
+		Ast operand = read_unary_expr();
+		ensure_lvalue(operand);
+		return new Ast(AST_TYPE.ADDR, new Ctype(operand.ctype), operand);
+	}
+	if (tok.is_punct('*')) {
+		Ast operand = read_unary_expr();
+		if (operand.ctype.type != CTYPE.PTR) {
+			error!("pointer type expected, but got %s", operand);
+		}
+		return new Ast(AST_TYPE.DEREF, operand.ctype.ptr, operand);
+	}
+	unget_token(tok);
+	return read_prim();
+}
 
-int get_ctype(Token tok) {
+Ctype get_ctype(Token tok) {
 	if (tok.type != TOKEN_TYPE.IDENT) {
-		return -1;
+		return null;
 	}
 	if (tok.sval == "int") {
-		return CTYPE.INT;
+		return Ctype.INT;
 	}
 	if (tok.sval == "char") {
-		return CTYPE.CHAR;
+		return Ctype.CHAR;
 	}
 	if (tok.sval == "string") {
-		return CTYPE.STR;
+		return Ctype.STR;
 	}
 
-	return -1;
+	return null;
 }
 
 bool is_type_keyword(Token tok) {
-	return get_ctype(tok) != -1;
+	return get_ctype(tok) !is null;
 }
 
 void expect(char punct) {
@@ -339,12 +433,19 @@ void expect(char punct) {
 	}
 }
 Ast read_decl() {
-	int ctype = get_ctype(read_token());
-	Token name = read_token();
-	if (name.type != TOKEN_TYPE.IDENT) {
-		error!("Identifier expected, but got %s", name);
+	auto ctype = get_ctype(read_token());
+	Token tok;
+	for (;;) {
+		tok = read_token();
+		if (!tok.is_punct('*')) {
+			break;
+		}
+		ctype = new Ctype(ctype);
 	}
-	Ast var = Ast.newVar(ctype, name.sval, vars);
+	if (tok.type != TOKEN_TYPE.IDENT) {
+		error!("Identifier expected, but got %s", tok);
+	}
+	Ast var = Ast.newVar(ctype, tok.sval, vars);
 	expect('=');
 	Ast init = read_expr(0);
 	return new Ast(var, init);
@@ -374,7 +475,7 @@ string quote(string s) {
 }
 void emit_assign(Ast var, Ast value) {
 	emit_expr(value);
-	writef("mov %%eax, -%d(%%rbp)\n\t", var.vpos * 4);
+	writef("mov %%rax, -%d(%%rbp)\n\t", var.vpos * 8);
 }
 void emit_binop(Ast ast) {
 	if (ast.type == '=') {
@@ -404,29 +505,36 @@ void emit_binop(Ast ast) {
 	write("push %rax\n\t");
 	emit_expr(ast.right);
 	if (ast.type == '/') {
-		write("mov %eax, %ebx\n\t");
+		write("mov %rax, %rbx\n\t");
 		write("pop %rax\n\t");
 		write("mov $0, %edx\n\t");
-		write("idiv %ebx\n\t");
+		write("idiv %rbx\n\t");
 	}
 	else {
 		write("pop %rbx\n\t");
-		writef("%s %%ebx, %%eax\n\t", op);
+		writef("%s %%rbx, %%rax\n\t", op);
 	}
 }
 void emit_expr(Ast ast) {
 	switch (ast.type) {
-		case AST_TYPE.INT:
-			writef("mov $%d, %%eax\n\t", ast.ival);
-			break;
-		case AST_TYPE.CHAR:
-			writef("mov $%d, %%eax\n\t", ast.c);
+		case AST_TYPE.LITERAL:
+			switch(ast.ctype.type) {
+				case CTYPE.INT:
+					writef("mov $%d, %%rax\n\t", ast.ival);
+					break;
+				case CTYPE.CHAR:
+					writef("mov $%d, %%rax\n\t", ast.c);
+					break;
+				case CTYPE.STR:
+					writef("lea .s%d(%%rip), %%rax\n\t", ast.sid);
+					break;
+				default:
+					error!("internal error");
+					break;
+			}
 			break;
 		case AST_TYPE.VAR:
-			writef("mov -%d(%%rbp), %%eax\n\t", ast.vpos*4);
-			break;
-		case AST_TYPE.STR:
-			writef("lea .s%s(%%rip), %%eax\n\t", ast.sid);
+			writef("mov -%d(%%rbp), %%rax\n\t", ast.vpos*8);
 			break;
 		case AST_TYPE.FUNCALL:
 			// レジスタの値を退避
@@ -442,7 +550,7 @@ void emit_expr(Ast ast) {
 			for (int i = cast(int)ast.args.length-1; i >= 0; i--) {
 				writef("pop %%%s\n\t", REGS[i]);
 			}
-			write("mov $0, %eax\n\t");
+			write("mov $0, %rax\n\t");
 			writef("call %s\n\t", ast.fname);
 			// 退避した値を戻す
 			for (int i = cast(int)ast.args.length-1; i > 0; i--) {
@@ -451,6 +559,15 @@ void emit_expr(Ast ast) {
 			break;
 		case AST_TYPE.DECL:
 			emit_assign(ast.decl_var, ast.decl_init);
+			break;
+		case AST_TYPE.ADDR:
+			assert(ast.operand.type == AST_TYPE.VAR);
+			writef("lea -%d(%%rbp), %%rax\n\t", ast.operand.vpos * 8);
+			break;
+		case AST_TYPE.DEREF:
+			assert(ast.operand.ctype.type == CTYPE.PTR);
+			emit_expr(ast.operand);
+			write("mov (%rax), %rax\n\t");
 			break;
 		default:
 			emit_binop(ast);
@@ -485,18 +602,24 @@ int main(string[] args)
 		emit_data_section();
 		write(".text\n\t"~
 			".global mymain\n"~
-			"mymain:\n\t");
+			"mymain:\n\t"~
+			"push %rbp\n\t"~
+			"mov %rsp, %rbp\n\t");
+		if (vars !is null) {
+			writef("sub $%d, %%rsp\n\t", vars.vpos*8);
+		}
 	}
 	foreach(expr; exprs) {
 		if (wantast) {
-			writeln(expr);
+			write(expr);
 		}
 		else {
 			emit_expr(expr);
 		}
 	}
 	if (!wantast) {
-		write("ret\n");
+		write("leave\n\t"~
+			"ret\n");
 	}
 	return 0;
 }
